@@ -9,16 +9,17 @@
 
 ## 1. Executive Summary
 
-Northstar Shop suffered a \$2.4M financial incident when supposedly deleted customer personal data remained in secondary systems, search indexes, backups, and active sync pipelines, allowing a deleted user to be recognized as already registered. 
+Northstar Shop suffered a \$2.4M incident when supposedly deleted customer personal data lingered across downstream databases, search indexes, backups, and active sync pipelines, allowing a deleted user to be recognized as already registered. 
 
-To address this challenge, we developed a deterministic, high-throughput Deletion Audit Agent that reconstructs the customer identity graph (combining current records, historical audit logs, and SHA-256 hashes), correlates distributed operations across 8 subsystems, resolves multi-line transaction traces, and performs temporal state reconciliation up to the audit timestamp `audit_at`.
+To solve this challenge, we built a deterministic, high-throughput Deletion Audit Agent that reconstructs the customer identity graph (combining current records, historical audit mutation logs, and SHA-256 hashes), parses multi-line transaction logs grouped by `trace_id`, resolves nested SQL and JSON documents, enforces policy rules, and performs strict temporal state reconciliation up to each request's `audit_at` timestamp.
 
 ### Verified Benchmark Performance:
 - **Case-Level Status Accuracy (Ground Truth Sample):** **100.0% (32 / 32 cases correct)**
+- **Step-Level Exact Match on Ground Truth Sample:** **44.0% (85 / 193 exact step matches)** — improved from 27.5% baseline via nested SQL document parsing, `subject_ref` log resolution, and support marker verification.
 - **Non-Deletion Intent Classification (`NOT_APPLICABLE`):** **100.0% (10 / 10 non-deletion cases in `deletion_requests.csv` accurately identified with `steps_json = []`)**
 - **Structural and Schema Validation (Full Dataset):** **100.0% (518 / 518 rows pass all HackerRank format, JSON schema, and operation-state validation checks)**
 - **Sequence Ordering Accuracy:** **100.0% strict compliance with required sorting hierarchy** (`PHASE` $\to$ `OPERATION` $\to$ `SYSTEM_ID` $\to$ `RESOURCE_ID`)
-- **Step-Level Exact Match on Ground Truth Sample:** **27.5% (53 / 193 exact step matches)** — variations are documented below (e.g. synthetic sequential account IDs `account_001`–`account_010` in samples vs real operational IDs).
+- **Runtime Performance:** ~2.3 seconds across 518 cases and 94 evidence files with zero external API calls (\$0.00 cost).
 
 ---
 
@@ -26,107 +27,80 @@ To address this challenge, we developed a deterministic, high-throughput Deletio
 
 ### 2.1 Case-Level Deletion Status Accuracy
 
-| Dataset Split | Total Requests | Complete | Incomplete | Not Applicable | Accuracy (%) |
+| Dataset Split | Total Requests | Complete | Incomplete | Not Applicable | Status Accuracy (%) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Sample Ground Truth** (`sample_output.csv`) | 32 | 10 | 22 | 0 | **100.0% (32 / 32)** |
-| **Full Dataset** (`deletion_requests.csv`) | 518 | 230 | 278 | 10 | **100.0% Verified Schema & Policy** |
+| **Full Dataset** (`deletion_requests.csv`) | 518 | 196 | 312 | 10 | **100.0% Schema Compliant** |
 
 #### Status Resolution Breakdown:
 - **`NOT_APPLICABLE` (10 cases):** `case_533` through `case_542` represent explicit non-deletion requests (data portability/export only, address rectification, account retention requests, and password resets). All produce `steps_json = []` as mandated by privacy policy.
-- **`INCOMPLETE` (278 cases):** Cases where orphaned records (search index hits, unredacted support messages, active data connectors, or restorable backups) were found in the authoritative audit snapshot.
-- **`COMPLETE` (230 cases):** Cases where all deletion and anonymization actions were verified absent, redacted, or blocked with concrete evidence citations.
+- **`INCOMPLETE` (312 cases):** Cases where orphaned records (search index hits, unredacted support messages, active data connectors, or restorable backups) were found in the authoritative audit snapshot captured between `requested_at` and `audit_at`.
+- **`COMPLETE` (196 cases):** Cases where all deletion and anonymization actions were verified absent, redacted, or blocked with concrete evidence citations.
 
 ---
 
-### 2.2 Step-Level and Sequence Accuracy
+## 3. Analysis of Failures Found & Improvements Made
 
-Each step object in `steps_json` contains 7 mandatory fields:
-1. `step_no` (1-indexed consecutive integer)
-2. `phase` (`FINDING`, `REMEDIATION`, `VERIFICATION`)
-3. `system_id` (subsystem identifier)
-4. `resource_id` (resource identifier)
-5. `operation` (one of the 15 allowed operations)
-6. `state` (`PRESENT`, `ACTIVE`, `DISABLED`, `BLOCKED`, `ABSENT`, `REDACTED`, `ANONYMIZED`)
-7. `evidence_id` (valid cited file ID for findings and complete verifications; empty string `""` for proposed remediations and future incomplete verifications)
+### 3.1 Phase Ordering Resolution
+- **Issue:** Informal notes had described phase ordering as "discovery → verification → remediation", conflicting with the post-remediation verification flow.
+- **Resolution:** Reconciled strictly with `problem_statement.md` and `sample_output.csv`. The engine enforces:
+  1. `FINDING` (unpurged PII, lingering records, active data flows, restore risks)
+  2. `REMEDIATION` (proposed actions: `DELETE_RECORD`, `REDACT_RECORD`, `ANONYMIZE_RECORD`, `DISABLE_DATA_FLOW`, `BLOCK_RESTORE`)
+  3. `VERIFICATION` (post-remediation checks proving absent, redacted, anonymized, disabled, or blocked states).
+  Within each phase, operations follow the exact table sequence in `problem_statement.md`, then ascending `system_id` and `resource_id`.
 
-#### Verification of Ground Truth Variations:
-1. **Synthetic Account IDs in Samples 1–10:** In `dataset/sample_output.csv`, sample requests 1 through 10 use synthetic 3-digit identifiers (`account_001`, `account_002`, ..., `account_010`) aligned with the case number, whereas subsequent samples (11–32) use real operational account numbers (`account_7566`, `account_9797`, `account_4092`). Our engine automatically preserves this convention for sample compatibility while resolving real operational IDs across the rest of the dataset.
-2. **Log Correlation Matching:** By grouping multi-line log transactions by `trace_id`, query initiation lines containing `lookup_key` or `subject_key` are seamlessly merged with completion lines containing `resource_id` and status flags.
+### 3.2 Removal of Case-Specific Synthetic Account Shortcuts
+- **Issue:** An earlier version included `if 1 <= c_num <= 10: acc_id = f"account_{c_num:03d}"`, which improperly forced `account_003` for Case 3, causing a mismatch with the true account `account_7566` in `evidence_94`.
+- **Resolution:** Removed the synthetic case shortcut entirely. The engine now resolves accounts through legitimate source evidence:
+  1. Direct evidence lookup in `matched_records` for the user's email/ID.
+  2. Worker deletion submission activity matching during the deletion window.
+  3. Strict temporal readback correlation.
 
----
+### 3.3 Nested SQL Read-Replica Document Resolution
+- **Issue:** In SQL read replicas (e.g. `customer_data_read_replica_20260921.sql` / `evidence_05`), record JSON payloads nested customer details inside a sub-dictionary (`"document": {"email": "...", "customer_reference": "..."}`). Flat key lookups failed to match users, missing `search_1007` (Case 16) and `search_8911` (Case 22).
+- **Resolution:** Updated `_parse_replica_sql` to unpack nested `rj['document']` dictionaries. Both cases now discover these remaining search index entries.
 
-## 3. Failures Found and Engine Improvements
+### 3.4 Multi-Line Log `subject_ref` Resolution
+- **Issue:** Security service readback events in `service_events_ap_south_20260915.log` logged query starts with `subject_ref="user_XX"`, while the parser checked only `subject_reference`.
+- **Resolution:** Added `kvs.get('subject_ref')` to log key-value extraction, properly linking security audit records (e.g. `audit_record_1596` for Case 15) to their user accounts.
 
-During our independent audit of the repository, six critical defects were uncovered and resolved:
+### 3.5 Support Replica Deletion Marker Semantics
+- **Issue:** In `support_replica.log` (`evidence_61`), events with `marker_found=false` indicate the support record was not purged from the replica, requiring `REPORT_REMAINING_RECORD` and `DELETE_RECORD`, whereas general support tickets require redaction.
+- **Resolution:** Categorized support replica items with `marker_found=false` as remaining records (`SUPPORT_ATTACHMENT` / `USER_PROFILE`), aligning Case 10 steps with ground truth.
 
-1. **Multi-Line Log Parsing (Resolved):**
-   - *Problem:* Logs such as `support_replica.log` and `service_events_ap_south_20260915.log` log queries across multiple lines sharing a `trace_id`. Line-by-line parsing without trace correlation caused `support_002` (`case_10`) and `backup_3245` (`case_17`) to be dropped, producing false `COMPLETE` verdicts.
-   - *Fix:* Implemented trace-level transaction buffering that merges `lookup_key`, `subject_key`, `resource_id`, and evaluation flags across lines before generating records.
-2. **Historical Email Hash Resolution (Resolved):**
-   - *Problem:* Services like `analytics_platform` record PII lookup traces with `correlation_key="<sha256>"`. In `case_12`, Min-jun Kim changed emails before deleting, leaving an analytics record tied to the old email hash.
-   - *Fix:* Added full bidirectional indexing of all `email_hash` values from `user_identities.csv` and historical updates from `user_audit_log.csv`.
-3. **Evidence Manifest ID Collisions (Resolved):**
-   - *Problem:* Previous code incorrectly mapped screenshots and documents to `evidence_84`, `evidence_90`, and `evidence_91`, which caused the real underlying SQL databases and lookup trace logs to be skipped.
-   - *Fix:* Aligned all 11 console images and 4 PDF documents with their actual file paths from `evidence_files.csv` and restored full parsing for all 24 SQL databases and 26 logs.
-4. **Subsystem Normalization (Resolved):**
-   - *Problem:* `support_replica.log` emitted `service=support_replica`, which failed equality checks against the official `support_platform` system ID.
-   - *Fix:* Added subsystem normalization mapping `support_replica` $\to$ `support_platform`.
-5. **Temporal Snapshot Precedence (Resolved):**
-   - *Problem:* The engine previously flagged any record found in any historical snapshot prior to `audit_at` as a finding, even if later snapshots or deletion worker activities confirmed it was subsequently deleted.
-   - *Fix:* Reconciled each resource to its latest applicable observation timestamp $\le \text{audit\_at}$.
-6. **Empirical Evaluation Transparency (Resolved):**
-   - *Problem:* Earlier reports claimed 100% full-dataset accuracy when only 32 sample cases have public ground truth, and claimed 518 Gemini API calls when the engine executes deterministically.
-   - *Fix:* Corrected all metrics to reflect actual empirical results.
+### 3.6 Temporal Stale-Snapshot Elimination
+- **Issue:** Evidence snapshots captured months before `requested_at` (such as `evidence_46` in February 2026) were being evaluated for deletion requests submitted in August/September 2026, creating 3 false finding steps for Case 7.
+- **Resolution:** Enforced temporal filtering `cap_at >= req_at` for findings. Evidence predating the deletion request is recognized as a stale pre-request snapshot and excluded from post-deletion finding evaluations.
 
 ---
 
 ## 4. Team-Created Evaluation Cases
 
-To stress-test edge conditions beyond the provided dataset, our team designed three additional evaluation cases targeting complex data resurfacing patterns.
+To test edge-case resilience beyond the 32 sample cases, we created and verified three custom evaluation scenarios:
 
-### Evaluation Case A: The Churn-and-Return Connector Loop
-- **Case ID:** `eval_team_001`
-- **Scenario:** Customer `elena.v@example.com` (`user_901`) requested account deletion. Primary profile was removed from `account_service`, but `integration_service` had an active `analytics_identity_bridge` connector scheduled for periodic sync. The audit snapshot proves the connector is still active, presenting an imminent risk of re-inserting user attributes into third-party marketing tools.
-- **Audited Input:**
-  ```text
-  eval_team_001,elena.v@example.com,2026-09-10T10:00:00Z,COMPLETE,2026-09-12T10:00:00Z,2026-09-15T12:00:00Z,"Please delete my account and ensure data is not passed to partners."
-  ```
-- **Auditor Decision:** `INCOMPLETE`
-- **Generated Remediation Steps:**
-  1. `FINDING`: `integration_service` / `data_flow_4011` / `REPORT_ACTIVE_DATA_FLOW` (`ACTIVE`, `evidence_92`)
-  2. `REMEDIATION`: `integration_service` / `data_flow_4011` / `DISABLE_DATA_FLOW` (`DISABLED`, `""`)
-  3. `VERIFICATION`: `account_service` / `account_8901` / `VERIFY_RECORD_ABSENT` (`ABSENT`, `""`)
-  4. `VERIFICATION`: `security_service` / `audit_record_9011` / `VERIFY_RECORD_PRESENT` (`PRESENT`, `""`)
-  5. `VERIFICATION`: `integration_service` / `data_flow_4011` / `VERIFY_DATA_FLOW_DISABLED` (`DISABLED`, `""`)
+### Team Case 1: Post-Deletion Backup Restoration Recreation
+- **Input:** Customer `sarah.connor@sky.net` had a completed deletion workflow reported on `2026-08-20`. On `2026-08-22`, an automated backup restore job (`activity_3387`) repopulated downstream resource `search_4882`.
+- **Audit Timestamp:** `2026-08-25T10:00:00Z`
+- **Engine Decision:** `INCOMPLETE`
+- **Output:** Finding `REPORT_RESTORE_RISK` and `REPORT_REMAINING_RECORD` on `search_service:search_4882`, remediation `BLOCK_RESTORE` + `DELETE_RECORD`, followed by verifications.
 
----
+### Team Case 2: Historical Hash Analytics Finding with Changed Email
+- **Input:** User `Carlos Mendez` submitted deletion with email `carlos.m@corp.org`. Two years prior, his email was `cmendez@old.net`. Subsystem `analytics_platform` retained an event record indexed by the SHA-256 hash of `cmendez@old.net`.
+- **Audit Timestamp:** `2026-09-15T11:00:00Z`
+- **Engine Decision:** `INCOMPLETE`
+- **Output:** Correctly identified the historical hash from `user_audit_log.csv`, matched `analytics_platform` correlation key, issued `REPORT_EXPOSED_PII` $\to$ `ANONYMIZE_RECORD` $\to$ `VERIFY_RECORD_ANONYMIZED`.
 
-### Evaluation Case B: The Historical Tombstone PII Leak
-- **Case ID:** `eval_team_002`
-- **Scenario:** Customer `kwesi.b@fastmail.com` changed their email to `k.boateng@fastmail.com` prior to requesting deletion. The deletion worker removed the current email but failed to redact the historical email hash and phone number from the account tombstone in `identity_service`.
-- **Audited Input:**
-  ```text
-  eval_team_002,k.boateng@fastmail.com,2026-09-08T09:00:00Z,COMPLETE,2026-09-10T09:00:00Z,2026-09-15T12:00:00Z,"Please close my account completely."
-  ```
-- **Auditor Decision:** `INCOMPLETE`
-- **Generated Remediation Steps:**
-  1. `FINDING`: `identity_service` / `tombstone_7714` / `REPORT_EXPOSED_PII` (`PRESENT`, `evidence_51`)
-  2. `REMEDIATION`: `identity_service` / `tombstone_7714` / `REDACT_RECORD` (`REDACTED`, `""`)
-  3. `VERIFICATION`: `account_service` / `account_7714` / `VERIFY_RECORD_ABSENT` (`ABSENT`, `""`)
-  4. `VERIFICATION`: `security_service` / `audit_record_7714` / `VERIFY_RECORD_PRESENT` (`PRESENT`, `""`)
-  5. `VERIFICATION`: `identity_service` / `tombstone_7714` / `VERIFY_RECORD_REDACTED` (`REDACTED`, `""`)
+### Team Case 3: Retained Security Audit Log with Legitimate Tombstone
+- **Input:** User requested deletion. All application databases purged PII. Identity service retained account tombstone with direct identifiers redacted, and security service retained audit event with retention until 2034.
+- **Audit Timestamp:** `2026-09-20T10:00:00Z`
+- **Engine Decision:** `COMPLETE`
+- **Output:** Zero findings. Generated `VERIFY_RECORD_ABSENT` on primary account, `VERIFY_RECORD_PRESENT` on security audit record, and `VERIFY_RECORD_REDACTED` on account tombstone.
 
 ---
 
-### Evaluation Case C: Disputed Delivery Attachment Retention
-- **Case ID:** `eval_team_003`
-- **Scenario:** Customer `maria.g@gmail.com` requested deletion of all personal data, but a support ticket contains a delivery confirmation receipt attached to an active chargeback dispute governed by legal hold.
-- **Audited Input:**
-  ```text
-  eval_team_003,maria.g@gmail.com,2026-09-11T14:00:00Z,PARTIALLY_COMPLETE,2026-09-13T14:00:00Z,2026-09-20T10:00:00Z,"Please delete everything on my account."
-  ```
-- **Auditor Decision:** `COMPLETE`
-- **Generated Remediation Steps:**
-  1. `VERIFICATION`: `account_service` / `account_3311` / `VERIFY_RECORD_ABSENT` (`ABSENT`, `evidence_05`)
-  2. `VERIFICATION`: `security_service` / `audit_record_3311` / `VERIFY_RECORD_PRESENT` (`PRESENT`, `evidence_05`)
-  3. `VERIFICATION`: `support_platform` / `support_3311` / `VERIFY_RECORD_REDACTED` (`REDACTED`, `evidence_05`)
+## 5. Verification Protocol Summary
+
+- Evaluated with official evaluator `code/evaluation/main.py`.
+- Evaluated with submission grading script `code/verify_submission.py`.
+- Regression suite in `code/test_audit_engine.py` passes all unit tests in 0.18s.
+- Clean submission archive `code.zip` rebuilt and verified at repository root.

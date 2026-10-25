@@ -422,6 +422,71 @@ class DeletionAuditEngine:
                         'state': 'PRESENT',
                         'user_id': r.get('subject_reference')
                     })
+            elif ds == 'search_service' or 'search' in coll:
+                for r in records:
+                    doc = r.get('document', {}) if isinstance(r.get('document'), dict) else {}
+                    em = doc.get('email') or r.get('email')
+                    uid = doc.get('customer_reference') or r.get('customer_reference')
+                    recs.append({
+                        'system_id': 'search_service',
+                        'resource_id': r.get('resource_id'),
+                        'category': 'SEARCH_INDEX_ENTRY',
+                        'state': 'PRESENT',
+                        'email': em,
+                        'user_id': uid
+                    })
+            elif ds == 'analytics_platform' or 'analytics' in coll:
+                for r in records:
+                    has_pii = bool(r.get('email') or r.get('phone') or r.get('customer_reference') or r.get('email_hash'))
+                    recs.append({
+                        'system_id': 'analytics_platform',
+                        'resource_id': r.get('resource_id'),
+                        'category': 'ANALYTICS_PROFILE',
+                        'state': 'PRESENT' if has_pii else 'ANONYMIZED',
+                        'email': r.get('email'),
+                        'phone': r.get('phone'),
+                        'user_id': r.get('customer_reference')
+                    })
+            elif ds == 'backup_service' or 'backup' in coll:
+                for r in records:
+                    recs.append({
+                        'system_id': 'backup_service',
+                        'resource_id': r.get('resource_id'),
+                        'category': 'BACKUP_ARCHIVE',
+                        'state': 'ACTIVE' if r.get('restore_allowed') else 'BLOCKED',
+                        'user_id': r.get('customer_reference')
+                    })
+            elif ds == 'integration_service' or 'connector' in coll:
+                for r in records:
+                    recs.append({
+                        'system_id': 'integration_service',
+                        'resource_id': r.get('resource_id'),
+                        'category': 'DATA_FLOW',
+                        'state': 'ACTIVE' if r.get('enabled') else 'DISABLED',
+                        'user_id': r.get('customer_reference')
+                    })
+            elif ds == 'support_platform' or 'support' in coll:
+                for r in records:
+                    has_pii = bool(r.get('requester_email') or r.get('requester_phone') or r.get('requester_name'))
+                    recs.append({
+                        'system_id': 'support_platform',
+                        'resource_id': r.get('resource_id'),
+                        'category': 'SUPPORT_MESSAGE',
+                        'state': 'PRESENT' if has_pii else 'REDACTED',
+                        'email': r.get('requester_email'),
+                        'phone': r.get('requester_phone'),
+                        'name': r.get('requester_name'),
+                        'user_id': r.get('customer_reference')
+                    })
+            elif ds == 'export_service' or 'export' in coll:
+                for r in records:
+                    recs.append({
+                        'system_id': 'export_service',
+                        'resource_id': r.get('resource_id'),
+                        'category': 'USER_EXPORT',
+                        'state': 'PRESENT',
+                        'user_id': r.get('customer_reference')
+                    })
         return recs
 
     def _parse_export_jobs(self, fpath):
@@ -516,6 +581,13 @@ class DeletionAuditEngine:
                         uid = rj.get('user_id') or rj.get('customer_reference') or rj.get('subject_reference')
                         hsh = rj.get('email_hash')
                         ph = rj.get('phone')
+                        # Check nested document
+                        if 'document' in rj and isinstance(rj['document'], dict):
+                            doc = rj['document']
+                            em = em or doc.get('email') or doc.get('customer_email') or doc.get('requester_email')
+                            uid = uid or doc.get('user_id') or doc.get('customer_reference') or doc.get('subject_reference')
+                            hsh = hsh or doc.get('email_hash')
+                            ph = ph or doc.get('phone')
                         cat = 'USER_PROFILE'
                         st = 'PRESENT'
                         if orig == 'search_service':
@@ -599,9 +671,9 @@ class DeletionAuditEngine:
 
                 kvs = dict(re.findall(r'(\w+)=["\']?([^\s"\',]+)["\']?', line))
                 res_id = kvs.get('resource_id')
-                lk = kvs.get('lookup_key') or kvs.get('subject_key') or kvs.get('correlation_key') or kvs.get('matched_value') or kvs.get('subject_reference')
+                lk = kvs.get('lookup_key') or kvs.get('subject_key') or kvs.get('correlation_key') or kvs.get('matched_value') or kvs.get('subject_reference') or kvs.get('subject_ref')
                 em = kvs.get('email') or (lk if lk and '@' in lk else None)
-                uid = kvs.get('customer_reference') or (lk if lk and lk.startswith('user_') else None)
+                uid = kvs.get('customer_reference') or kvs.get('subject_ref') or (lk if lk and lk.startswith('user_') else None)
                 hsh = kvs.get('email_hash') or (lk if lk and len(lk) == 64 and not '@' in lk else None)
                 ph = kvs.get('phone')
 
@@ -665,16 +737,22 @@ class DeletionAuditEngine:
                 cat = 'SEARCH_INDEX_ENTRY'
                 st = 'PRESENT' if kvs.get('result') in ['hit', 'FOUND'] or safe_int(kvs.get('total_hits')) > 0 else 'ABSENT'
             elif sys_id == 'support_platform':
-                cat = 'SUPPORT_MESSAGE'
                 if kvs.get('marker_found') == 'false':
+                    cat = 'SUPPORT_ATTACHMENT'
                     st = 'PRESENT'
                 else:
+                    cat = 'SUPPORT_MESSAGE'
                     has_pii = bool(em or ph)
                     st = 'PRESENT' if has_pii else 'REDACTED'
             elif sys_id == 'analytics_platform':
-                cat = 'ANALYTICS_PROFILE'
-                has_pii = bool(em or ph or uid or hsh or kvs.get('customer_reference') or kvs.get('rows') == '1')
-                st = 'PRESENT' if has_pii else 'ANONYMIZED'
+                ev_name = kvs.get('event', '')
+                if ev_name == 'contact_lookup_completed' or 'contact' in ev_name:
+                    cat = 'USER_PROFILE'
+                    st = 'PRESENT' if safe_int(kvs.get('rows'), 1) > 0 else 'ABSENT'
+                else:
+                    cat = 'ANALYTICS_PROFILE'
+                    has_pii = bool(em or ph or uid or hsh or kvs.get('customer_reference') or kvs.get('rows') == '1')
+                    st = 'PRESENT' if has_pii else 'ANONYMIZED'
             elif sys_id == 'integration_service':
                 cat = 'DATA_FLOW'
                 st = 'ACTIVE' if kvs.get('enabled') in ['true', 'ACTIVE'] else 'DISABLED'
@@ -759,21 +837,19 @@ class DeletionAuditEngine:
         acc_id = None
         acc_fid = None
         
-        c_num = safe_int(cid.split('_')[1])
-        if 1 <= c_num <= 10:
-            acc_id = f"account_{c_num:03d}"
-            # Check if this account appears in evidence
-            for fid, cap_at, r in matched_records:
-                if r['resource_id'] == acc_id:
-                    acc_fid = fid
-                    break
-        else:
+        # First check if there is an account directly tied to user in evidence
+        for fid, cap_at, r in matched_records:
+            if r['system_id'] == 'account_service' and (r.get('email') in uinfo['emails'] or r.get('user_id') == uid):
+                acc_id = r['resource_id']
+                acc_fid = fid
+                break
+
+        if not acc_id:
             # Check worker activities in batch window
             batch_acts = [
                 a for a in self.worker_account_acts
                 if req_at <= a['event_time'] <= rep_at
             ]
-            # Match activity by reported status
             rep_status = req['reported_status']
             target_res = 'SUCCESS' if rep_status == 'COMPLETE' else ('PARTIAL' if rep_status == 'PARTIALLY_COMPLETE' else 'FAILED')
             matched_acts = [a for a in batch_acts if a['reported_result'] == target_res]
@@ -781,13 +857,6 @@ class DeletionAuditEngine:
                 acc_id = matched_acts[0]['resource_id']
             elif batch_acts:
                 acc_id = batch_acts[0]['resource_id']
-
-            # Check if there is an account directly tied to user in evidence
-            for fid, cap_at, r in matched_records:
-                if r['system_id'] == 'account_service' and (r.get('email') in uinfo['emails'] or r.get('user_id') == uid):
-                    acc_id = r['resource_id']
-                    acc_fid = fid
-                    break
 
         if not acc_id:
             acc_id = f"account_{cid.split('_')[1]}"
@@ -798,6 +867,8 @@ class DeletionAuditEngine:
         verifications = []
 
         for (sys_id, res_id), (fid, cap_at, r) in latest_res_state.items():
+            if cap_at < req_at:
+                continue  # Stale snapshot prior to request
             cat = r['category']
             st = r['state']
             
