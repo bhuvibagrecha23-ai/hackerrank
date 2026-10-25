@@ -3,3 +3,5 @@ __pycache__/
 *$py.class
 .cache/
 .pytest_cache/
+solution.zip
+chat_transcript.txt
