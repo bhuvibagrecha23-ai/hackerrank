@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Evaluator for Northstar Shop Deletion Audit Agent
-Computes case-level, step-level, and sequence accuracy against ground truth.
+Computes case-level, step-level, sequence-exact, and field-level accuracy against ground truth.
+Generates code/evaluation/sample_pred.csv for independent audit and tolerant evaluation.
 """
 
 import os
@@ -15,6 +16,9 @@ DATASET_DIR = os.path.join(REPO_ROOT, 'dataset')
 OUTPUT_PATH = os.path.join(REPO_ROOT, 'output.csv')
 SAMPLE_REQUESTS_PATH = os.path.join(DATASET_DIR, 'sample_deletion_requests.csv')
 SAMPLE_OUTPUT_PATH = os.path.join(DATASET_DIR, 'sample_output.csv')
+SAMPLE_PRED_PATH = os.path.join(REPO_ROOT, 'code', 'evaluation', 'sample_pred.csv')
+
+FIELDS = ['step_no', 'phase', 'system_id', 'resource_id', 'operation', 'state', 'evidence_id']
 
 def evaluate():
     print("Evaluating Northstar Shop Deletion Audit Agent...")
@@ -51,24 +55,59 @@ def evaluate():
         status_correct = 0
         total_steps_truth = 0
         total_steps_matched = 0
+        sequence_exact_cases = 0
+        total_fields_truth = 0
+        total_fields_matched = 0
 
+        pred_rows = []
         for req in sample_reqs:
             cid = req['case_id']
             truth = sample_truth[cid]
             pred_status, pred_steps = engine.audit_case(req)
+            pred_rows.append({
+                'case_id': cid,
+                'deletion_status': pred_status,
+                'steps_json': json.dumps(pred_steps)
+            })
+
             if pred_status == truth['deletion_status']:
                 status_correct += 1
             
             t_steps = json.loads(truth['steps_json'])
             total_steps_truth += len(t_steps)
+            total_fields_truth += len(t_steps) * len(FIELDS)
+
+            case_seq_match = (pred_status == truth['deletion_status'] and len(t_steps) == len(pred_steps))
             if len(t_steps) == len(pred_steps):
                 for ts, ps in zip(t_steps, pred_steps):
-                    if all(ts.get(k) == ps.get(k) for k in ['step_no', 'phase', 'system_id', 'resource_id', 'operation', 'state', 'evidence_id']):
+                    step_match = True
+                    for k in FIELDS:
+                        if ts.get(k) == ps.get(k):
+                            total_fields_matched += 1
+                        else:
+                            step_match = False
+                    if step_match:
                         total_steps_matched += 1
+                    else:
+                        case_seq_match = False
+            else:
+                case_seq_match = False
 
-        print(f"\nGround Truth Sample Evaluation ({len(sample_reqs)} cases):")
-        print(f"  Case Status Accuracy: {status_correct} / {len(sample_reqs)} ({status_correct / len(sample_reqs) * 100:.1f}%)")
-        print(f"  Step Match Accuracy:  {total_steps_matched} / {total_steps_truth} ({total_steps_matched / total_steps_truth * 100:.1f}%)")
+            if case_seq_match:
+                sequence_exact_cases += 1
+
+        # Write sample_pred.csv for auditability
+        with open(SAMPLE_PRED_PATH, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['case_id', 'deletion_status', 'steps_json'])
+            writer.writeheader()
+            writer.writerows(pred_rows)
+
+        print(f"\nGround Truth Sample Benchmark ({len(sample_reqs)} cases):")
+        print(f"  Case Status Accuracy:    {status_correct} / {len(sample_reqs)} ({status_correct / len(sample_reqs) * 100:.1f}%)")
+        print(f"  Sequence-Exact Accuracy: {sequence_exact_cases} / {len(sample_reqs)} ({sequence_exact_cases / len(sample_reqs) * 100:.1f}%)")
+        print(f"  Step Match Accuracy:     {total_steps_matched} / {total_steps_truth} ({total_steps_matched / total_steps_truth * 100:.1f}%)")
+        print(f"  Field-Level Accuracy:    {total_fields_matched} / {total_fields_truth} ({total_fields_matched / total_fields_truth * 100:.1f}%)")
+        print(f"Saved sample predictions to {SAMPLE_PRED_PATH}")
 
 if __name__ == '__main__':
     evaluate()
