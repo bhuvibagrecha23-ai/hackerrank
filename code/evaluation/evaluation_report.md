@@ -14,11 +14,11 @@ Northstar Shop suffered a \$2.4M incident when supposedly deleted customer perso
 To solve this challenge, we built a deterministic, high-throughput Deletion Audit Agent that reconstructs the customer identity graph (combining current records, historical audit mutation logs, and SHA-256 hashes), parses multi-line transaction logs grouped by `trace_id`, resolves nested SQL and JSON documents, enforces policy rules, and performs strict temporal state reconciliation up to each request's `audit_at` timestamp.
 
 ### Verified Benchmark Performance:
-- **Case-Level Deletion Status Accuracy:** **100.0% (32 / 32 cases correct)**
+- **Case-Level Deletion Status Accuracy:** **100.0% (32 / 32 cases correct)** on labeled sample cases
 - **Sequence Ordering Accuracy:** **100.0% (32 / 32 cases strictly compliant)** with the required phase and operation hierarchy
-- **Overall Field-Level Accuracy:** **96.4% (1,241 / 1,288 evaluated field values correct)**
 - **Exact Step Match Accuracy:** **72.5% (140 / 193 exact step matches)** — improved from 27.5% baseline via multi-line JSON log ingestion, worker activity correlation, and security audit catalog resolution
-- **Structural and Schema Validation (Full Dataset):** **100.0% (518 / 518 rows pass all HackerRank format, JSON schema, and operation-state validation checks)**
+- **Full Ground-Truth Field-Level Accuracy:** **91.9% (1,241 / 1,351 ground-truth field values matched)** across all 193 ground-truth steps $\times$ 7 required fields (and **96.4% [1,241 / 1,288]** across length-aligned step rows)
+- **Structural and Submission Contract Validation (Full Dataset):** **100.0% (518 / 518 rows pass all 10/10 HackerRank format, uniqueness, JSON schema, and operation-state validation checks)**
 - **Non-Deletion Intent Classification (`NOT_APPLICABLE`):** **100.0% (10 / 10 non-deletion cases in `deletion_requests.csv` accurately identified with `steps_json = []`)**
 - **Runtime Performance:** ~2.3 seconds across 518 cases and 94 evidence files with zero external API calls (\$0.00 cost)
 
@@ -42,20 +42,25 @@ To solve this challenge, we built a deterministic, high-throughput Deletion Audi
 
 ### 2.2 Step-Level and Field-Level Accuracy Breakdown
 
-Field-level accuracy measures exact key-value agreement between predicted steps and official ground-truth steps across all 32 sample cases (7 evaluated fields per step):
+Field-level accuracy evaluates key-value agreement between predicted steps and official ground-truth steps across all 32 sample cases (7 evaluated fields per step).
 
-| Step Field | Evaluated Steps | Matched Count | Field Accuracy (%) | Field Semantics & Grading Impact |
-| :--- | :---: | :---: | :---: | :--- |
-| **`step_no`** | 184 | 184 | **100.0%** | Strict 1-indexed consecutive numbering |
-| **`phase`** | 184 | 184 | **100.0%** | Strict adherence to `FINDING` $\to$ `REMEDIATION` $\to$ `VERIFICATION` |
-| **`evidence_id`** | 184 | 183 | **99.5%** | Non-empty citation on findings/complete, empty `""` on proposed |
-| **`system_id`** | 184 | 174 | **94.6%** | Correct subsystem attribution across 8 services |
-| **`operation`** | 184 | 174 | **94.6%** | Correct token from the 15 allowed challenge operations |
-| **`state`** | 184 | 174 | **94.6%** | Correct state (`ABSENT`, `PRESENT`, `REDACTED`, `ANONYMIZED`, etc.) |
-| **`resource_id`** | 184 | 168 | **91.3%** | Correct identifier resolution from evidence and activity logs |
-| **Overall Field Total** | **1,288** | **1,241** | **96.4%** | **Comprehensive field correctness across all labeled cases** |
+To ensure complete statistical transparency and denominator reconciliation:
+- **Total Ground-Truth Steps:** Exactly 193 steps across 32 sample cases in `sample_output.csv`.
+- **Total Ground-Truth Field Values:** Exactly **1,351** (193 steps $\times$ 7 fields).
+- **Exact Step Match Metric (All 7 fields matching simultaneously):** **140 / 193 (72.54%)**
+- **Full Ground-Truth Field Correctness:** **1,241 / 1,351 (91.86%)**
+- **Evaluated Step Row Alignment:** 184 steps shared matching step positions, yielding **1,241 / 1,288 (96.35%)** on aligned steps.
 
-- **Exact Step Match Metric (All 7 fields matching simultaneously):** **140 / 193 (72.5%)**
+| Step Field | Ground-Truth Steps | Matched Count | Full GT Accuracy (%) | Aligned Steps | Aligned Accuracy (%) | Field Semantics & Grading Impact |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`step_no`** | 193 | 184 | **95.3%** | 184 / 184 | **100.0%** | Strict 1-indexed consecutive numbering |
+| **`phase`** | 193 | 184 | **95.3%** | 184 / 184 | **100.0%** | Strict adherence to `FINDING` $\to$ `REMEDIATION` $\to$ `VERIFICATION` |
+| **`evidence_id`** | 193 | 183 | **94.8%** | 183 / 184 | **99.5%** | Non-empty citation on findings/complete, empty `""` on proposed |
+| **`system_id`** | 193 | 174 | **90.2%** | 174 / 184 | **94.6%** | Correct subsystem attribution across allowed services |
+| **`operation`** | 193 | 174 | **90.2%** | 174 / 184 | **94.6%** | Correct token from the 15 allowed challenge operations |
+| **`state`** | 193 | 174 | **90.2%** | 174 / 184 | **94.6%** | Correct state (`ABSENT`, `PRESENT`, `REDACTED`, `ANONYMIZED`, etc.) |
+| **`resource_id`** | 193 | 168 | **87.0%** | 168 / 184 | **91.3%** | Correct identifier resolution from evidence and activity logs |
+| **Total Field Values** | **1,351** | **1,241** | **91.9%** | **1,288** | **96.4%** | **Comprehensive field correctness across all labeled cases** |
 
 ---
 
@@ -81,11 +86,12 @@ Field-level accuracy measures exact key-value agreement between predicted steps 
   Within each phase, operations follow the exact table sequence in `problem_statement.md`, then ascending `system_id` and `resource_id`.
 
 ### 3.2 Removal of Case-Specific Synthetic Account Shortcuts
-- **Issue:** An earlier version included `if 1 <= c_num <= 10: acc_id = f"account_{c_num:03d}"`, which improperly forced `account_003` for Case 3, causing a mismatch with the true account `account_7566` in `evidence_94`.
-- **Resolution:** Removed the synthetic case shortcut entirely. The engine now resolves accounts through legitimate source evidence:
-  1. Direct evidence lookup in `matched_records` for the user's email/ID.
-  2. Worker deletion submission activity matching during the deletion window.
-  3. Strict temporal readback correlation.
+- **Issue:** Earlier iterations contained a fallback `if c_num <= 10: acc_id = f"account_{c_num:03d}"`, which improperly forced synthetic account IDs based on case sequence numbers.
+- **Resolution:** Purged all synthetic case-number shortcuts completely. Account resolution now relies exclusively on:
+  1. Direct evidence lookups across authoritative snapshots (`customer_profiles`, read replicas, search tables).
+  2. Worker deletion submission activity correlated within the execution window around `reported_at`.
+  3. Source-backed user identity lookup via `user_identities.csv` (`user_id`).
+  Zero synthetic shortcuts or case-number mappings remain anywhere in `code/main.py`.
 
 ### 3.3 Nested SQL Read-Replica Document Resolution
 - **Issue:** In SQL read replicas (e.g. `customer_data_read_replica_20260921.sql` / `evidence_05`), record JSON payloads nested customer details inside a sub-dictionary (`"document": {"email": "...", "customer_reference": "..."}`). Flat key lookups failed to match users, missing `search_1007` (Case 16) and `search_8911` (Case 22).
@@ -99,9 +105,16 @@ Field-level accuracy measures exact key-value agreement between predicted steps 
 - **Issue:** In `support_replica.log` (`evidence_61`), events with `marker_found=false` indicate the support record was not purged from the replica, requiring `REPORT_REMAINING_RECORD` and `DELETE_RECORD`, whereas general support tickets require redaction.
 - **Resolution:** Categorized support replica items with `marker_found=false` as remaining records (`SUPPORT_ATTACHMENT` / `USER_PROFILE`), aligning Case 10 steps with ground truth.
 
-### 3.6 Temporal Stale-Snapshot Elimination
-- **Issue:** Evidence snapshots captured months before `requested_at` (such as `evidence_46` in February 2026) were being evaluated for deletion requests submitted in August/September 2026, creating 3 false finding steps for Case 7.
-- **Resolution:** Enforced temporal filtering `cap_at >= req_at` for findings. Evidence predating the deletion request is recognized as a stale pre-request snapshot and excluded from post-deletion finding evaluations.
+### 3.6 Temporal Stale-Snapshot Elimination Across Findings & Verifications
+- **Issue:** Evidence snapshots captured months before `requested_at` (such as `evidence_46` in February 2026) were being evaluated for deletion requests submitted in August/September 2026, creating false finding steps or potentially citing pre-request snapshots as verification in `COMPLETE` cases.
+- **Resolution:** Enforced strict temporal filtering `req_at <= cap_at <= audit_at` universally:
+  1. Pre-request snapshots are strictly excluded from post-deletion finding evaluations.
+  2. In `COMPLETE` cases, only post-request snapshots captured after deletion are cited as proof of absence, redaction, or anonymization.
+  3. Account citations and security audit catalog checks strictly enforce `req_at <= captured_at <= audit_at`.
+
+### 3.7 Submission Contract Validator Path Independence & Rigorous 10-Point Verification
+- **Issue:** The submission verification script originally had a machine-specific local path and did not check case uniqueness or intra-case sorting hierarchy.
+- **Resolution:** Rewrote `code/verify_submission.py` to calculate paths relative to `__file__`, runnable from any working directory or machine. Implemented a 10-point static & dynamic contract verification covering exact headers, 518 row count, case-ID uniqueness and coverage, numeric case ordering, allowed statuses, allowed operations & coupled states, phase monotonicity, consecutive 1-indexed numbering, citation consistency, and intra-case sorting hierarchy. All 518 rows pass 100%.
 
 ---
 

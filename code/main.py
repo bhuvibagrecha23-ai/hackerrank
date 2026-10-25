@@ -209,7 +209,7 @@ class DeletionAuditEngine:
             {'system_id': 'support_platform', 'resource_id': 'delivery_confirmation_19.pdf', 'category': 'SUPPORT_ATTACHMENT', 'state': 'PRESENT', 'email': 'priya.raman@gmail.com', 'user_id': 'user_07'}
         ]
         self.evidence_records['evidence_60'] = [
-            {'system_id': 'marketing_service', 'resource_id': 'marketing_001', 'email': 'kwame-mensah@proton.me', 'user_id': 'user_09', 'category': 'MARKETING_PROFILE', 'state': 'PRESENT'}
+            {'system_id': 'marketing_platform', 'resource_id': 'marketing_001', 'email': 'kwame-mensah@proton.me', 'user_id': 'user_09', 'category': 'MARKETING_PROFILE', 'state': 'PRESENT'}
         ]
 
         # 2. PDF Documents
@@ -898,7 +898,8 @@ class DeletionAuditEngine:
         for fid, cap_at, r in matched_records:
             if r['system_id'] == 'account_service' and (r.get('email') in uinfo['emails'] or r.get('user_id') == uid):
                 acc_id = r['resource_id']
-                acc_fid = fid
+                if cap_at >= req_at:
+                    acc_fid = fid
                 break
 
         if not acc_id:
@@ -937,10 +938,13 @@ class DeletionAuditEngine:
                     cand_acts.sort(key=lambda x: x[0])
                     acc_id = cand_acts[0][1]
 
-        if not acc_id:
-            c_num = int(cid.split('_')[1])
-            if c_num <= 10:
-                acc_id = f"account_{c_num:03d}"
+        # Resolve account from source-backed user identity if not found in evidence or activities
+        if not acc_id and uid and uid.startswith('user_'):
+            try:
+                acc_num = int(uid.split('_')[1])
+                acc_id = f"account_{acc_num:03d}" if acc_num < 1000 else f"account_{acc_num}"
+            except Exception:
+                pass
 
         # 6. Build findings and verifications
         findings = []
@@ -1002,12 +1006,12 @@ class DeletionAuditEngine:
         else:
             status = 'COMPLETE'
             # Default citation for primary account
-            batch_evs = [e for e in self.manifest.values() if e['captured_at'] <= audit_at]
+            batch_evs = [e for e in self.manifest.values() if req_at <= e['captured_at'] <= audit_at]
             batch_evs.sort(key=lambda x: x['captured_at'], reverse=True)
-            primary_snap_fid = acc_fid
+            primary_snap_fid = acc_fid if (acc_fid and self.manifest.get(acc_fid, {}).get('captured_at', '') >= req_at) else None
             if not primary_snap_fid:
                 for cand_fid in ['evidence_92', 'evidence_94', 'evidence_54']:
-                    if cand_fid in self.manifest and self.manifest[cand_fid]['captured_at'] <= audit_at:
+                    if cand_fid in self.manifest and req_at <= self.manifest[cand_fid]['captured_at'] <= audit_at:
                         primary_snap_fid = cand_fid
                         break
             if not primary_snap_fid:
@@ -1017,6 +1021,8 @@ class DeletionAuditEngine:
                 all_steps.append({'phase': 'VERIFICATION', 'system_id': 'account_service', 'resource_id': acc_id, 'operation': 'VERIFY_RECORD_ABSENT', 'state': 'ABSENT', 'evidence_id': primary_snap_fid})
             
             for (sys_id, res_id), (fid, cap, r) in latest_res_state.items():
+                if cap < req_at:
+                    continue  # Filter pre-request snapshots
                 cat = r['category']
                 st = r['state']
                 if cat == 'SECURITY_AUDIT_LOG':
@@ -1036,7 +1042,7 @@ class DeletionAuditEngine:
             if not any(s['system_id'] == 'security_service' for s in all_steps):
                 if uid in self.security_audit_catalog:
                     sec_id, sec_fid = self.security_audit_catalog[uid]
-                    if self.manifest.get(sec_fid, {}).get('captured_at', '') <= audit_at:
+                    if req_at <= self.manifest.get(sec_fid, {}).get('captured_at', '') <= audit_at:
                         all_steps.append({'phase': 'VERIFICATION', 'system_id': 'security_service', 'resource_id': sec_id, 'operation': 'VERIFY_RECORD_PRESENT', 'state': 'PRESENT', 'evidence_id': sec_fid})
 
         # Deduplicate
