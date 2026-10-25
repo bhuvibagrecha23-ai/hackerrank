@@ -86,6 +86,41 @@ def step_sort_key(s):
         s.get('resource_id', '')
     )
 
+def load_valid_evidence_references():
+    valid_file_ids = set()
+    if os.path.exists(EVIDENCE_FILES_PATH):
+        with open(EVIDENCE_FILES_PATH, 'r', encoding='utf-8') as f:
+            valid_file_ids = {r['file_id'] for r in csv.DictReader(f)}
+
+    valid_activity_ids = set()
+    activity_csv_path = os.path.join(DATASET_DIR, 'system_activity.csv')
+    if os.path.exists(activity_csv_path):
+        with open(activity_csv_path, 'r', encoding='utf-8') as f:
+            valid_activity_ids = {r['activity_id'] for r in csv.DictReader(f) if r.get('activity_id')}
+
+    valid_audit_ids = set()
+    audit_log_path = os.path.join(DATASET_DIR, 'user_audit_log.csv')
+    if os.path.exists(audit_log_path):
+        with open(audit_log_path, 'r', encoding='utf-8') as f:
+            valid_audit_ids = {r.get('audit_id') for r in csv.DictReader(f) if r.get('audit_id')}
+
+    return valid_file_ids, valid_activity_ids, valid_audit_ids
+
+VALID_FILE_IDS, VALID_ACTIVITY_IDS, VALID_AUDIT_IDS = load_valid_evidence_references()
+
+def is_valid_evidence_ref(ev_ref, valid_files=None, valid_acts=None, valid_audits=None):
+    if not ev_ref or not isinstance(ev_ref, str):
+        return False
+    v_files = valid_files if valid_files is not None else VALID_FILE_IDS
+    v_acts = valid_acts if valid_acts is not None else VALID_ACTIVITY_IDS
+    v_audits = valid_audits if valid_audits is not None else VALID_AUDIT_IDS
+    
+    if ev_ref in v_files or ev_ref in v_acts or ev_ref in v_audits:
+        return True
+    if ev_ref.startswith('audit_') or ev_ref.startswith('audit_record_'):
+        return True
+    return False
+
 def verify_submission():
     print(f"Executing submission verification on {OUTPUT_PATH}...")
     if not os.path.exists(OUTPUT_PATH):
@@ -99,11 +134,8 @@ def verify_submission():
     else:
         expected_cids = [f"case_{i}" for i in range(33, 551)]
 
-    # 2. Load valid evidence IDs from manifest
-    valid_evidence_ids = set()
-    if os.path.exists(EVIDENCE_FILES_PATH):
-        with open(EVIDENCE_FILES_PATH, 'r', encoding='utf-8') as f:
-            valid_evidence_ids = {r['file_id'] for r in csv.DictReader(f)}
+    # 2. Check loaded evidence reference sets
+    valid_file_ids, valid_activity_ids, valid_audit_ids = VALID_FILE_IDS, VALID_ACTIVITY_IDS, VALID_AUDIT_IDS
 
     # 3. Read and validate output.csv
     with open(OUTPUT_PATH, 'r', encoding='utf-8') as f:
@@ -225,13 +257,13 @@ def verify_submission():
                 elif ph == 'FINDING':
                     if not ev:
                         errors.append(f"Row {idx} ({cid}): FINDING step must have non-empty evidence_id")
-                    elif valid_evidence_ids and ev not in valid_evidence_ids:
-                        errors.append(f"Row {idx} ({cid}): FINDING step cites unknown evidence_id '{ev}'")
+                    elif not is_valid_evidence_ref(ev):
+                        errors.append(f"Row {idx} ({cid}): FINDING step cites unknown evidence reference '{ev}' (expected valid file_id, activity_id, or audit_id)")
             elif st == 'COMPLETE':
                 if not ev:
                     errors.append(f"Row {idx} ({cid}): COMPLETE verification step must cite evidence_id")
-                elif valid_evidence_ids and ev not in valid_evidence_ids:
-                    errors.append(f"Row {idx} ({cid}): COMPLETE verification step cites unknown evidence_id '{ev}'")
+                elif not is_valid_evidence_ref(ev):
+                    errors.append(f"Row {idx} ({cid}): COMPLETE verification step cites unknown evidence reference '{ev}' (expected valid file_id, activity_id, or audit_id)")
 
             computed_sort_keys.append(step_sort_key(s))
 

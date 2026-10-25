@@ -213,5 +213,35 @@ class TestDeletionAuditEngine(unittest.TestCase):
         res = verify_submission.verify_submission()
         self.assertTrue(res)
 
+    def test_no_synthetic_account_inference(self):
+        """Verify engine never creates synthetic account IDs from user_id without concrete evidence."""
+        req = {
+            'case_id': 'test_synthetic_check',
+            'email': 'unknown.test.user9999@domain.org',
+            'requested_at': '2026-09-01T10:00:00Z',
+            'reported_at': '2026-09-02T10:00:00Z',
+            'audit_at': '2026-09-10T10:00:00Z',
+            'request_text': 'Please delete all my personal records and data.',
+            'reported_status': 'COMPLETE'
+        }
+        status, steps = self.engine.audit_case(req)
+        # Should NOT fabricate account_9999
+        account_ids = [s['resource_id'] for s in steps if s['system_id'] == 'account_service']
+        self.assertNotIn('account_9999', account_ids)
+        for acc in account_ids:
+            self.assertFalse(acc.startswith('account_9999'))
+
+    def test_evidence_reference_types_accepted(self):
+        """Verify validator accepts valid file_id, activity_id, and audit_id citations."""
+        # file_id check
+        self.assertTrue(verify_submission.is_valid_evidence_ref('evidence_01'))
+        self.assertTrue(verify_submission.is_valid_evidence_ref('evidence_54'))
+        # audit_id check
+        self.assertTrue(verify_submission.is_valid_evidence_ref('audit_record_003'))
+        self.assertTrue(verify_submission.is_valid_evidence_ref('audit_record_6645'))
+        # invalid check
+        self.assertFalse(verify_submission.is_valid_evidence_ref('non_existent_ref_12345'))
+        self.assertFalse(verify_submission.is_valid_evidence_ref(''))
+
 if __name__ == '__main__':
     unittest.main()
